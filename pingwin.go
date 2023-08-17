@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"time"
 
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
@@ -27,6 +28,26 @@ type Pingwin struct {
 	PacketTimeout int
 	responder     chan PingwinResponse
 	messages      [][]byte
+	requests      map[*net.IPAddr][]time.Time
+	responses     []RawResponse
+}
+
+type ICMPReply struct {
+	*icmp.Message
+	Addr       *net.IPAddr
+	Err        error
+	ReceivedAt time.Time
+}
+
+type RawResponse struct {
+	message    []byte
+	addr       *net.IPAddr
+	receivedAt time.Time
+}
+
+func (r *RawResponse) ToICMPReply() ICMPReply {
+	msg, err := icmp.ParseMessage(1, r.message)
+	return ICMPReply{msg, r.addr, err, r.receivedAt}
 }
 
 type PingwinResponse struct {
@@ -78,49 +99,77 @@ func (p *Pingwin) Run(ctx context.Context, hosts []string) <-chan PingwinRespons
 	}
 	// defer sock.Close()
 
-	go p.send(ctx, sock, hosts)
-	go p.receive(ctx, sock)
+	destinations := make([]*net.IPAddr, len(hosts))
+	for i, host := range hosts {
+		log.Println("Resolving:", host)
+		destinations[i], err = net.ResolveIPAddr("ip4", host)
+
+		if err != nil {
+			log.Fatal(err) // TODO: proper handling?
+		}
+	}
+
+	p.responses = make([]RawResponse, 0, p.Count*len(hosts))
+	_ = p.send(ctx, sock, destinations)
+	recvDone := p.receive(ctx, sock)
+
+	go p.postProcess(ctx, recvDone, destinations)
 
 	return p.responder
 }
 
-func (p *Pingwin) send(ctx context.Context, sock *icmp.PacketConn, hosts []string) {
-	for _, msg := range p.messages {
-		for _, host := range hosts {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				log.Println("Sending to:", host)
-				_, err := sock.WriteTo(msg, &net.IPAddr{IP: net.ParseIP(host)})
-				if err != nil {
-					log.Println(err)
+func (p *Pingwin) send(ctx context.Context, sock *icmp.PacketConn, hosts []*net.IPAddr) <-chan struct{} {
+	done := make(chan struct{})
+	t := time.NewTicker(time.Duration(p.Interval * int(time.Millisecond)))
+	p.requests = make(map[*net.IPAddr][]time.Time)
+
+	go func() {
+		defer close(done)
+		for i := 0; i < p.Count; i++ {
+			for _, host := range hosts {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					_, err := sock.WriteTo(p.messages[i], host)
+					if err != nil {
+						log.Println(err) // TODO: sort out error handling
+					} else {
+						p.requests[host] = append(p.requests[host], time.Now())
+					}
 				}
 			}
+			<-t.C
 		}
-	}
+	}()
+
+	return done
 }
 
-func (p *Pingwin) receive(ctx context.Context, sock *icmp.PacketConn) {
-	buf := make([]byte, p.Size)
-	select {
-	case <-ctx.Done():
-		return
-	default:
+func (p *Pingwin) receive(ctx context.Context, sock *icmp.PacketConn) <-chan struct{} {
+	done := make(chan struct{})
+	sock.SetReadDeadline(time.Now().Add(time.Duration(p.Timeout * int(time.Millisecond))))
+	go func() {
+		buf := make([]byte, p.Size)
+		defer close(done)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
 				bytes, peer, err := sock.ReadFrom(buf)
+				if err, ok := err.(net.Error); ok && err.Timeout() {
+					return
+				}
+
 				if bytes == 0 || err != nil {
 					continue
 				}
-				resp, err := icmp.ParseMessage(ipv4.ICMPTypeEcho.Protocol(), buf[:bytes])
-				log.Println(peer, resp, err)
+				p.responses = append(p.responses, RawResponse{buf[:bytes], peer.(*net.IPAddr), time.Now()})
 			}
 		}
-	}
+	}()
+	return done
 }
 
 // preparePackets can go either the memory efficient way, or the CPU efficient way.
@@ -150,4 +199,17 @@ func (p *Pingwin) preparePackets() error {
 	log.Println("Prepared packets: ", len(p.messages))
 
 	return nil
+}
+
+func (p *Pingwin) postProcess(ctx context.Context, recvDone <-chan struct{}, hosts []*net.IPAddr) {
+	<-recvDone
+	log.Println("Processing responses")
+	for _, response := range p.responses {
+		icmpReply := response.ToICMPReply()
+		if icmpReply.Err != nil {
+			log.Println(icmpReply.Err)
+			continue
+		}
+		log.Println(icmpReply)
+	}
 }

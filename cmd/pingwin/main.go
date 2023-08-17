@@ -26,8 +26,8 @@ func main() {
 	flag.IntVar(&count, "c", 4, "Packets to send per host.")
 	flag.IntVar(&size, "s", 56, "Size of the packet to send, in bytes.")
 	flag.IntVar(&interval, "i", 1000, "Wait interval seconds between sending each packet, per host.")
-	flag.IntVar(&timeout, "t", 2000, "Time to wait for a response, in milliseconds.")
-	flag.IntVar(&packetTimeout, "w", 1000, "Time to wait for a response, in milliseconds.")
+	flag.IntVar(&timeout, "t", 2000, "Total time for listening for all replies, in milliseconds.")
+	flag.IntVar(&packetTimeout, "w", 1000, "Time to wait for a response for individual packet, in milliseconds.")
 	flag.Parse()
 	hosts = flag.Args()
 
@@ -40,5 +40,4 @@ func main() {
 		// do something with the result
 		fmt.Println(result)
 	}
-
 }
