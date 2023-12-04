@@ -131,7 +131,7 @@ func (p *Pingwin) send(ctx context.Context, sock *icmp.PacketConn, hosts []*net.
 	// preallocate all buffers
 	p.requests = make(map[*net.IPAddr][]*time.Time)
 	for _, host := range hosts {
-		p.requests[host] = make([]*time.Time, 0, p.Count)
+		p.requests[host] = make([]*time.Time, p.Count)
 	}
 
 	go func() {
