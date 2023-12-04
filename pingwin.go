@@ -142,6 +142,7 @@ func (p *Pingwin) send(ctx context.Context, sock *icmp.PacketConn, hosts []*net.
 				case <-ctx.Done():
 					return
 				default:
+					log.Println("Sending to:", host)
 					_, err := sock.WriteTo(p.messages[i], host)
 					if err != nil {
 						log.Println(err) // TODO: sort out error handling
@@ -160,6 +161,7 @@ func (p *Pingwin) send(ctx context.Context, sock *icmp.PacketConn, hosts []*net.
 
 func (p *Pingwin) receive(ctx context.Context, sock *icmp.PacketConn) <-chan struct{} {
 	done := make(chan struct{})
+	// TODO: Either wait for a global timeout, or refresh the timeout on each received packet.
 	sock.SetReadDeadline(time.Now().Add(time.Duration(p.Timeout * int(time.Millisecond))))
 	go func() {
 		buf := make([]byte, p.Size)
@@ -172,6 +174,8 @@ func (p *Pingwin) receive(ctx context.Context, sock *icmp.PacketConn) <-chan str
 			default:
 				bytes, peer, err := sock.ReadFrom(buf)
 				if err, ok := err.(net.Error); ok && err.Timeout() {
+					// TODO: Stop sending if we've reached the global timeout. context.Cancel ?
+					log.Println("Global timeout reached, exiting")
 					// global timeout is reached, exit the receive loop
 					return
 				}
