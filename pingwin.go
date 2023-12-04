@@ -2,6 +2,7 @@ package pingwin
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -20,6 +21,8 @@ const (
 	defaultPacketTimeout = 1000
 )
 
+const ICMPv4 = 1
+
 type Pingwin struct {
 	Count         int
 	Size          int
@@ -28,7 +31,7 @@ type Pingwin struct {
 	PacketTimeout int
 	responder     chan PingwinResponse
 	messages      [][]byte
-	requests      map[*net.IPAddr][]time.Time
+	requests      map[*net.IPAddr][]*time.Time
 	responses     []RawResponse
 }
 
@@ -46,8 +49,12 @@ type RawResponse struct {
 }
 
 func (r *RawResponse) ToICMPReply() ICMPReply {
-	msg, err := icmp.ParseMessage(1, r.message)
+	msg, err := icmp.ParseMessage(ICMPv4, r.message)
 	return ICMPReply{msg, r.addr, err, r.receivedAt}
+}
+
+func (r RawResponse) String() string {
+	return fmt.Sprintf("%s from %s: icmp_seq=%d time=%s", r.message, r.addr.String(), r.receivedAt.Format(time.RFC3339Nano))
 }
 
 type PingwinResponse struct {
@@ -109,7 +116,7 @@ func (p *Pingwin) Run(ctx context.Context, hosts []string) <-chan PingwinRespons
 		}
 	}
 
-	p.responses = make([]RawResponse, 0, p.Count*len(hosts))
+	p.responses = make([]RawResponse, p.Count*len(hosts))
 	_ = p.send(ctx, sock, destinations)
 	recvDone := p.receive(ctx, sock)
 
@@ -121,7 +128,11 @@ func (p *Pingwin) Run(ctx context.Context, hosts []string) <-chan PingwinRespons
 func (p *Pingwin) send(ctx context.Context, sock *icmp.PacketConn, hosts []*net.IPAddr) <-chan struct{} {
 	done := make(chan struct{})
 	t := time.NewTicker(time.Duration(p.Interval * int(time.Millisecond)))
-	p.requests = make(map[*net.IPAddr][]time.Time)
+	// preallocate all buffers
+	p.requests = make(map[*net.IPAddr][]*time.Time)
+	for _, host := range hosts {
+		p.requests[host] = make([]*time.Time, 0, p.Count)
+	}
 
 	go func() {
 		defer close(done)
@@ -135,7 +146,8 @@ func (p *Pingwin) send(ctx context.Context, sock *icmp.PacketConn, hosts []*net.
 					if err != nil {
 						log.Println(err) // TODO: sort out error handling
 					} else {
-						p.requests[host] = append(p.requests[host], time.Now())
+						now := time.Now()
+						p.requests[host][i] = &now
 					}
 				}
 			}
@@ -152,6 +164,7 @@ func (p *Pingwin) receive(ctx context.Context, sock *icmp.PacketConn) <-chan str
 	go func() {
 		buf := make([]byte, p.Size)
 		defer close(done)
+		var i = 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -159,13 +172,15 @@ func (p *Pingwin) receive(ctx context.Context, sock *icmp.PacketConn) <-chan str
 			default:
 				bytes, peer, err := sock.ReadFrom(buf)
 				if err, ok := err.(net.Error); ok && err.Timeout() {
+					// global timeout is reached, exit the receive loop
 					return
 				}
 
 				if bytes == 0 || err != nil {
 					continue
 				}
-				p.responses = append(p.responses, RawResponse{buf[:bytes], peer.(*net.IPAddr), time.Now()})
+				p.responses[i] = RawResponse{buf[:bytes], peer.(*net.IPAddr), time.Now()}
+				i++
 			}
 		}
 	}()
